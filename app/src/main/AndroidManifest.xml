@@ -2,20 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!--
-      targetSdk 30 filters package queries. Without this block queryIntentActivities() for the
-      SMS send intents comes back filtered and getApplicationInfo() throws NameNotFound, so the
-      app picker in MainActivity could only ever show the hardcoded defaults.
+      Lets the app list what is installed, so the picker can offer any messaging app rather than
+      only the ones registered to send SMS. QUERY_ALL_PACKAGES is a normal, install-time
+      permission: it is granted when the APK installs and has no runtime prompt.
     -->
-    <queries>
-        <intent>
-            <action android:name="android.intent.action.SENDTO" />
-            <data android:scheme="smsto" />
-        </intent>
-        <intent>
-            <action android:name="android.intent.action.SENDTO" />
-            <data android:scheme="mmsto" />
-        </intent>
-    </queries>
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
     <application
         android:allowBackup="false"

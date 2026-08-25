@@ -14,6 +14,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import android.provider.Telephony
+import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -171,18 +172,25 @@ class MainActivity : Activity() {
     private fun appsCard(): View {
         val card = card()
         card.addView(TextView(this).apply {
-            text = "Announce messages from"
+            text = "Announce messages from:"
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(color(R.color.text_primary))
             setPadding(0, 0, 0, dp(6))
+        })
+        card.addView(TextView(this).apply {
+            // Kept to one line: this sits above a list on a 320dp-wide screen.
+            text = "Experimental; only message notifications work"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setTextColor(color(R.color.text_dim))
+            setPadding(0, dp(2), 0, dp(4))
         })
         appList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         card.addView(appList)
         return card
     }
 
-    private fun appRow(pkg: String, checked: Boolean): View {
+    private fun appRow(pkg: String, checked: Boolean, seen: Boolean): View {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -193,13 +201,27 @@ class MainActivity : Activity() {
             layoutParams = LinearLayout.LayoutParams(dp(24), dp(24))
                 .apply { rightMargin = dp(10) }
         })
-        row.addView(TextView(this).apply {
+        val labels = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        labels.addView(TextView(this).apply {
             text = labelFor(pkg)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             setTextColor(color(R.color.text_primary))
             maxLines = 1
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         })
+        // Only standard message notifications are announced, so an app can be switched on and stay
+        // silent. Saying so beats leaving the user to wonder which of the two it is.
+        if (checked && !seen) {
+            labels.addView(TextView(this).apply {
+                text = "no messages seen yet"
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                setTextColor(color(R.color.text_dim))
+                maxLines = 1
+            })
+        }
+        row.addView(labels)
         row.addView(Switch(this).apply {
             isChecked = checked
             tintSwitch(this)
@@ -244,16 +266,45 @@ class MainActivity : Activity() {
 
         appList.removeAllViews()
         val watched = MessageCollector.loadWatched(this)
-        val apps = smsApps().sortedBy { labelFor(it).lowercase() }
-        if (apps.isEmpty()) {
+        val seen = MessageCollector.loadSeenMessaging(this)
+        val likely = likelyMessagingApps()
+        val installed = installedApps()
+            .filter { watched.contains(it) || seen.contains(it) || likely.contains(it) }
+            .sortedBy { labelFor(it).lowercase() }
+        // Names, not just counts: when an app you expected is missing, this line is the answer.
+        Log.i(TAG, "picker shows " + installed + "; detected as messaging: " + likely)
+        if (installed.isEmpty()) {
             appList.addView(TextView(this).apply {
-                text = "No messaging apps found"
+                text = "No apps found"
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                 setTextColor(color(R.color.text_dim))
             })
-        } else {
-            apps.forEach { appList.addView(appRow(it, watched.contains(it))) }
+            return
         }
+
+        // Watched first so switching one off is never a scroll hunt, then the apps most likely to
+        // be worth watching: ones actually observed messaging you, then ones that can send texts.
+        val groups = listOf(
+            "On" to installed.filter { watched.contains(it) },
+            "Seen messaging you" to installed.filter { !watched.contains(it) && seen.contains(it) },
+            "Looks like a messaging app" to installed.filter {
+                !watched.contains(it) && !seen.contains(it)
+            }
+        )
+        for ((heading, packages) in groups) {
+            if (packages.isEmpty()) continue
+            appList.addView(groupHeading(heading))
+            packages.forEach {
+                appList.addView(appRow(it, watched.contains(it), seen.contains(it)))
+            }
+        }
+    }
+
+    private fun groupHeading(text: String) = TextView(this).apply {
+        this.text = text.uppercase()
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+        setTextColor(color(R.color.text_dim))
+        setPadding(0, dp(10), 0, dp(2))
     }
 
     private fun toggleRelay() {
@@ -286,12 +337,72 @@ class MainActivity : Activity() {
     private fun relayEnabled(): Boolean = prefs.getBoolean(MessageCollector.KEY_ENABLED, true)
 
     /**
-     * Installed apps that handle SMS/MMS: the default SMS app, everything registered for the
-     * smsto:/mmsto: SENDTO intents, plus the known native/Google packages if present.
-     * Visible under targetSdk 30 thanks to the <queries> block in the manifest.
+     * Everything installed that a person could plausibly open, which is as good a proxy for
+     * "could message me" as the package manager offers. Requires QUERY_ALL_PACKAGES; without it
+     * this returns only what the manifest declared visibility for.
      */
-    private fun smsApps(): Set<String> {
-        val result = HashSet<String>(MessageCollector.WATCHED_DEFAULT)
+    private fun installedApps(): List<String> = try {
+        packageManager.getInstalledApplications(0)
+            .map { it.packageName }
+            .filter { pkg ->
+                pkg != packageName &&
+                    !MessageCollector.HIDDEN_PACKAGES.contains(pkg) &&
+                    packageManager.getLaunchIntentForPackage(pkg) != null
+            }
+    } catch (t: Throwable) {
+        Log.w(TAG, "package enumeration failed", t)
+        MessageCollector.loadWatched(this).toList()
+    }
+
+    /**
+     * Apps that can plausibly deliver a message, worked out before any of them has posted one.
+     * Four independent signals, any one sufficient:
+     *
+     *   1. notification channels that look like a messenger's - the strongest, read from the bound
+     *      listener (see MessageCollector.channelsSuggestMessaging);
+     *   2. CATEGORY_APP_MESSAGING, the app declaring itself a messaging app in its manifest;
+     *   3. registered to send SMS/MMS;
+     *   4. named in MessageCollector.KNOWN_MESSENGERS - because signals 1-3 verifiably miss
+     *      WhatsApp, Signal, Telegram and Discord, none of which declare the category, handle SMS,
+     *      or expose conversation ids before their first message.
+     *
+     * A fourth signal - requesting RECEIVE_SMS/READ_SMS - was tried and dropped: on this phone it
+     * pulled in the Play Store and the emergency-alert receiver, both of which hold SMS permissions
+     * for one-time codes and broadcasts rather than for messaging.
+     *
+     * None of these prove the app posts standard message notifications; only seeing one does. That
+     * is what makes everything outside Google Messages experimental, and why apps actually observed
+     * messaging you are ranked above this list.
+     */
+    private fun likelyMessagingApps(): Set<String> {
+        val result = HashSet<String>()
+        result.addAll(smsCapable())
+        result.addAll(declaredMessagingApps())
+        result.addAll(MessageCollector.KNOWN_MESSENGERS)
+
+        val listener = MessageCollector.instance
+        for (pkg in installedApps()) {
+            if (result.contains(pkg)) continue
+            if (listener?.channelsSuggestMessaging(pkg) == true) result.add(pkg)
+        }
+        return result
+    }
+
+    /** Apps declaring CATEGORY_APP_MESSAGING - a manifest-level "I am a messaging app". */
+    private fun declaredMessagingApps(): Set<String> = try {
+        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_MESSAGING)
+        packageManager.queryIntentActivities(intent, 0)
+            .mapNotNull { it.activityInfo?.packageName }
+            .toSet()
+    } catch (t: Throwable) {
+        emptySet()
+    }
+
+    /**
+     * Apps registered to send SMS/MMS. No longer the whole list - just one signal among several.
+     */
+    private fun smsCapable(): Set<String> {
+        val result = HashSet<String>()
         try {
             Telephony.Sms.getDefaultSmsPackage(this)?.let { result.add(it) }
         } catch (_: Throwable) {
@@ -303,26 +414,27 @@ class MainActivity : Activity() {
             }
         }
         return result
-            .filter { installed(it) && !MessageCollector.HIDDEN_PACKAGES.contains(it) }
-            .toSet()
     }
 
-    private fun installed(pkg: String): Boolean = try {
-        packageManager.getApplicationInfo(pkg, 0); true
-    } catch (_: PackageManager.NameNotFoundException) {
-        false
+    // The list went from a handful of SMS apps to everything installed, and refresh() rebuilds it
+    // on every resume - so resolve each label and icon once.
+    private val labelCache = HashMap<String, String>()
+    private val iconCache = HashMap<String, Drawable?>()
+
+    private fun labelFor(pkg: String): String = labelCache.getOrPut(pkg) {
+        try {
+            packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+        } catch (_: PackageManager.NameNotFoundException) {
+            pkg
+        }
     }
 
-    private fun labelFor(pkg: String): String = try {
-        packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
-    } catch (_: PackageManager.NameNotFoundException) {
-        pkg
-    }
-
-    private fun iconFor(pkg: String): Drawable? = try {
-        packageManager.getApplicationIcon(pkg)
-    } catch (_: PackageManager.NameNotFoundException) {
-        null
+    private fun iconFor(pkg: String): Drawable? = iconCache.getOrPut(pkg) {
+        try {
+            packageManager.getApplicationIcon(pkg)
+        } catch (_: PackageManager.NameNotFoundException) {
+            null
+        }
     }
 
     // ---------------------------------------------------------------- widgets
@@ -398,4 +510,8 @@ class MainActivity : Activity() {
     private fun color(res: Int): Int = resources.getColor(res, theme)
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    private companion object {
+        const val TAG = "CoverNotifier/UI"
+    }
 }

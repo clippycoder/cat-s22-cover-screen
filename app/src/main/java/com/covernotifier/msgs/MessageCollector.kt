@@ -57,7 +57,7 @@ class MessageCollector : NotificationListenerService() {
         super.onCreate()
         prefs = getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
         enabled = prefs.getBoolean(KEY_ENABLED, true)
-        watched = prefs.getStringSet(KEY_WATCHED, null) ?: WATCHED_DEFAULT
+        watched = prefs.getStringSet(KEY_WATCHED, null) ?: defaultWatched(this)
         showText = prefs.getBoolean(KEY_SHOW_TEXT, true)
         CoverScreen.ensureChannel(this)
     }
@@ -77,7 +77,48 @@ class MessageCollector : NotificationListenerService() {
         Log.w(TAG, "listener disconnected")
     }
 
-    override fun onNotificationPosted(sbn: StatusBarNotification?) = rebuild()
+    override fun onNotificationPosted(sbn: StatusBarNotification?) {
+        sbn?.let {
+            noteMessagingPackage(it)
+            logDecision(it)
+        }
+        rebuild()
+    }
+
+    /**
+     * Remembers every package seen posting a conversation - watched or not. The picker uses this to
+     * float apps that genuinely message you above the rest of the installed list, which beats
+     * guessing from intent filters.
+     */
+    private fun noteMessagingPackage(sbn: StatusBarNotification) {
+        val pkg = sbn.packageName
+        if (pkg == packageName || HIDDEN_PACKAGES.contains(pkg)) return
+        val n = sbn.notification ?: return
+        if (!isConversation(n)) return
+        val seen = prefs.getStringSet(KEY_SEEN, null).orEmpty()
+        if (seen.contains(pkg) || seen.size >= MAX_SEEN) return
+        Log.i(TAG, "first conversation notification from " + pkg)
+        prefs.edit().putStringSet(KEY_SEEN, seen + pkg).apply()
+    }
+
+    /**
+     * One line per notification from a watched app, recording what the filter decided and why.
+     * The filter is written against documented notification shapes; this is how a real message
+     * confirms them, and how a false rejection gets explained later.
+     */
+    private fun logDecision(sbn: StatusBarNotification) {
+        if (!watched.contains(sbn.packageName)) return
+        val n = sbn.notification ?: return
+        Log.i(
+            TAG,
+            "seen " + sbn.packageName +
+                " channel=" + n.channelId +
+                " category=" + n.category +
+                " template=" + n.extras?.getString(Notification.EXTRA_TEMPLATE) +
+                " flags=0x" + Integer.toHexString(n.flags) +
+                " accepted=" + accept(sbn)
+        )
+    }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification?) = rebuild()
 
@@ -92,7 +133,9 @@ class MessageCollector : NotificationListenerService() {
     }
 
     fun setWatched(pkgs: Set<String>) {
-        watched = if (pkgs.isEmpty()) WATCHED_DEFAULT else pkgs
+        // An empty set is a legitimate choice now that the picker lists every app - it means
+        // "announce nothing", not "fall back to the defaults".
+        watched = pkgs
         prefs.edit().putStringSet(KEY_WATCHED, watched).apply()
         rebuild()
     }
@@ -105,6 +148,31 @@ class MessageCollector : NotificationListenerService() {
     }
 
     fun isEnabled() = enabled
+
+    /**
+     * Whether an app's notification channels look like a messenger's, without waiting for it to
+     * post anything. Only a bound listener may read another package's channels, which is why this
+     * lives on the service rather than in the UI.
+     *
+     * Two tells, both set by the app itself:
+     *   - a channel carrying a conversation id, which Android only creates for apps using
+     *     conversation shortcuts (Google Messages and WhatsApp do);
+     *   - AudioAttributes usage USAGE_NOTIFICATION_COMMUNICATION_INSTANT, which is literally the
+     *     app declaring "this channel is instant messaging".
+     *
+     * Channels exist only after the app has run once and registered them, so a freshly installed
+     * app can read as unknown until first launch.
+     */
+    fun channelsSuggestMessaging(pkg: String): Boolean = try {
+        getNotificationChannels(pkg, android.os.Process.myUserHandle()).any { channel ->
+            channel.conversationId != null ||
+                channel.audioAttributes?.usage ==
+                android.media.AudioAttributes.USAGE_NOTIFICATION_COMMUNICATION_INSTANT
+        }
+    } catch (t: Throwable) {
+        // Not connected yet, or the platform refused the lookup.
+        false
+    }
 
     // ------------------------------------------------------------------ pipeline
 
@@ -258,28 +326,109 @@ class MessageCollector : NotificationListenerService() {
             Notification.FLAG_FOREGROUND_SERVICE
         if (n.flags and skipFlags != 0) return false
 
-        // Google Messages posts transient bookkeeping notifications (bugle_broadcast_receiver_
-        // channel) around every real event; without a content check each one re-triggers an
-        // announce. Real message notifications always carry title/text.
+        if (!isConversation(n)) return false
+
+        // Even a conversation notification is useless with nothing displayable in it.
         val parsed = parse(sbn)
         return !(TextUtils.isEmpty(parsed.first) && TextUtils.isEmpty(parsed.second))
     }
 
-    /** Sender (or title) + single-line-ish preview, no MessagingStyle API (stub drift). */
+    /**
+     * A real conversation, as opposed to the app talking about itself.
+     *
+     * Google Messages posts on a dozen channels - bugle_rcs_not_delivered_channel for send
+     * failures, bugle_connected_to_web_channel_v, bugle_reminder_channel, bugle_auto_moved_spam_
+     * channel and so on - and every one of them used to reach the cover screen looking like a
+     * message. Two signals separate a conversation from all of that, either sufficient:
+     *
+     *   - MessagingStyle, which every modern messaging app uses for an actual exchange (Google
+     *     Messages, WhatsApp, Signal, Discord DMs) and none of the prompt/error notifications do;
+     *   - CATEGORY_MESSAGE, for simpler apps that never adopted MessagingStyle.
+     *
+     * Deliberately an allowlist with no escape hatch: a blocklist of categories or bugle_* channel
+     * names loses to the next channel rename, and an "announce anything from this app" override
+     * would put the noise straight back.
+     */
+    private fun isConversation(n: Notification): Boolean {
+        val template = n.extras?.getString(Notification.EXTRA_TEMPLATE).orEmpty()
+        return template.endsWith("MessagingStyle") || n.category == Notification.CATEGORY_MESSAGE
+    }
+
+    /** What the panel shows: a title line and a preview line. */
     private fun parse(sbn: StatusBarNotification): Pair<String, String> {
         val extras = sbn.notification?.extras ?: return "" to ""
+        val (title, body) = fromMessagingStyle(extras) ?: fromLegacyExtras(extras)
+        return title to (if (body.length > MAX_PREVIEW) body.substring(0, MAX_PREVIEW - 1) + "…" else body)
+    }
+
+    /**
+     * Reads the actual message out of MessagingStyle's own history.
+     *
+     * The extras hold a Parcelable[] of Bundles, one per message. Reading those keys directly
+     * rather than going through Notification.MessagingStyle.extractMessagingStyleFromNotification()
+     * is deliberate: the API route already failed here once (see git history), and this layout has
+     * been stable since API 24.
+     *
+     * Group chats are titled with the conversation, not the speaker - on a 128px line the useful
+     * thing is "which chat", and the speaker still rides along in the preview.
+     */
+    private fun fromMessagingStyle(extras: android.os.Bundle): Pair<String, String>? {
+        val raw = extras.getParcelableArray(Notification.EXTRA_MESSAGES) ?: return null
+
+        var newest: android.os.Bundle? = null
+        var newestTime = Long.MIN_VALUE
+        for (item in raw) {
+            val msg = item as? android.os.Bundle ?: continue
+            // A null sender means the message is from you. With RCS multi-device your own replies
+            // sync back into the notification, and announcing those would be nonsense.
+            if (senderOf(msg).isEmpty()) continue
+            val time = msg.getLong(KEY_TIME, 0L)
+            if (newest == null || time >= newestTime) {
+                newest = msg
+                newestTime = time
+            }
+        }
+        val msg = newest ?: return null
+
+        val speaker = senderOf(msg)
+        val text = clean(msg.getCharSequence(KEY_TEXT)).ifEmpty { attachmentLabel(msg) }
+        val conversation = clean(extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE))
+        val isGroup = extras.getBoolean(Notification.EXTRA_IS_GROUP_CONVERSATION, false)
+
+        return if (isGroup || conversation.isNotEmpty()) {
+            val title = conversation.ifEmpty { clean(extras.getCharSequence(Notification.EXTRA_TITLE)) }
+            title to if (text.isEmpty()) "" else speaker + ": " + text
+        } else {
+            speaker.ifEmpty { clean(extras.getCharSequence(Notification.EXTRA_TITLE)) } to text
+        }
+    }
+
+    /** Pre-MessagingStyle shape, and the fallback whenever the message history is unusable. */
+    private fun fromLegacyExtras(extras: android.os.Bundle): Pair<String, String> {
         val title = clean(extras.getCharSequence(Notification.EXTRA_TITLE))
         var body = clean(
             extras.getCharSequence(Notification.EXTRA_TEXT)
                 ?: extras.getCharSequence(Notification.EXTRA_BIG_TEXT)
                 ?: extras.getCharSequence(Notification.EXTRA_SUMMARY_TEXT)
         )
-        // Picture/attachment messages often carry no text at all, or carry only the inline-image
-        // placeholder that clean() strips. Without this they would be filtered out by accept() and
-        // never announced.
+        // Picture messages often carry no text at all, or only the inline-image placeholder that
+        // clean() strips. Without this they would fail accept()'s content check and never announce.
         if (body.isEmpty() && hasAttachment(extras)) body = "Photo"
-        if (body.length > MAX_PREVIEW) body = body.substring(0, MAX_PREVIEW - 1) + "…"
         return title to body
+    }
+
+    /** Person name, legacy sender string, or empty - empty also meaning "this one is from you". */
+    private fun senderOf(msg: android.os.Bundle): String {
+        val person = msg.getParcelable<android.app.Person>(KEY_SENDER_PERSON)
+        val name = clean(person?.name)
+        if (name.isNotEmpty()) return name
+        return clean(msg.getCharSequence(KEY_SENDER))
+    }
+
+    /** A message whose payload is a file rather than words. */
+    private fun attachmentLabel(msg: android.os.Bundle): String {
+        val mime = msg.getString(KEY_DATA_MIME_TYPE) ?: return ""
+        return if (mime.startsWith("image/")) "Photo" else "Attachment"
     }
 
     /**
@@ -304,6 +453,16 @@ class MessageCollector : NotificationListenerService() {
         const val KEY_ENABLED = "enabled"
         const val KEY_WATCHED = "watched"
         const val KEY_SHOW_TEXT = "show_text"
+        const val KEY_SEEN = "seen_messaging"
+
+        /** MessagingStyle.Message bundle keys - stable since API 24, not public constants. */
+        private const val KEY_TEXT = "text"
+        private const val KEY_TIME = "time"
+        private const val KEY_SENDER = "sender"
+        private const val KEY_SENDER_PERSON = "sender_person"
+        private const val KEY_DATA_MIME_TYPE = "type"
+
+        private const val MAX_SEEN = 50
 
         /**
          * The relay broadcast always uses this package string - it is just the key
@@ -321,10 +480,67 @@ class MessageCollector : NotificationListenerService() {
          */
         val HIDDEN_PACKAGES = setOf("com.android.messaging")
 
-        val WATCHED_DEFAULT = setOf(
-            "com.android.mms",
-            "com.google.android.apps.messaging"
+        /** Hardcoded: Google Messages is the point of the app. */
+        val WATCHED_DEFAULT = setOf("com.google.android.apps.messaging")
+
+        /**
+         * Known messengers, listed by name because Android offers no way to recognise them.
+         *
+         * Checked against the real manifests: Signal declares no CATEGORY_APP_MESSAGING and dropped
+         * its SMS handlers entirely; Telegram declares neither and randomises its channel ids
+         * without ever setting a conversation id; WhatsApp and Discord use fixed channel sets with
+         * no conversation ids either. So every programmatic signal this app has misses all four,
+         * and they would stay invisible until their first message arrived.
+         *
+         * Curated lists are also what shipping products do here - CoverScreenOS drives its caller
+         * ID the same way, and the watch companions all fall back to per-app toggles over the
+         * installed list.
+         *
+         * Being listed only offers an app in the picker. Nothing is announced until the user turns
+         * it on AND the app posts a message-style notification.
+         */
+        val KNOWN_MESSENGERS = setOf(
+            "com.whatsapp",
+            "com.whatsapp.w4b",
+            "org.thoughtcrime.securesms",
+            "org.telegram.messenger",
+            "org.telegram.messenger.web",
+            "com.discord",
+            "com.facebook.orca",
+            "com.facebook.mlite",
+            "com.viber.voip",
+            "jp.naver.line.android",
+            "com.kakao.talk",
+            "com.tencent.mm",
+            "com.skype.raider",
+            "com.microsoft.teams",
+            "com.Slack",
+            "com.google.android.apps.dynamite",
+            "com.snapchat.android",
+            "com.groupme.android",
+            "ch.threema.app",
+            "com.wire",
+            "im.vector.app",
+            "network.loki.messenger",
+            "com.imo.android.imoim"
         )
+
+        /**
+         * Defaults plus whatever actually holds the SMS role, so someone whose texting app is not
+         * Messages is not left with a list that ignores their texts.
+         */
+        fun defaultWatched(ctx: Context): Set<String> {
+            val role = try {
+                android.provider.Telephony.Sms.getDefaultSmsPackage(ctx)
+            } catch (_: Throwable) {
+                null
+            }
+            return if (role == null || HIDDEN_PACKAGES.contains(role)) {
+                WATCHED_DEFAULT
+            } else {
+                WATCHED_DEFAULT + role
+            }
+        }
 
         /** Two lines of ~11px text on a 128px screen; anything longer is truncated anyway. */
         private const val MAX_PREVIEW = 120
@@ -350,6 +566,11 @@ class MessageCollector : NotificationListenerService() {
 
         fun loadWatched(ctx: Context): Set<String> =
             ctx.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
-                .getStringSet(KEY_WATCHED, null) ?: WATCHED_DEFAULT
+                .getStringSet(KEY_WATCHED, null) ?: defaultWatched(ctx)
+
+        /** Packages observed posting a conversation notification, watched or not. */
+        fun loadSeenMessaging(ctx: Context): Set<String> =
+            ctx.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
+                .getStringSet(KEY_SEEN, null).orEmpty()
     }
 }
