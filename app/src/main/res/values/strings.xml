@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Cover Notifier</string>
+    <string name="channel_name">Cover Notifier service</string>
+    <string name="service_running">Mirroring notifications to the cover screen</string>
+</resources>

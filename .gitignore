@@ -1,0 +1,18 @@
+# Build output
+build/
+.gradle/
+.kotlin/
+
+# Machine-specific
+local.properties
+*.iml
+.idea/
+.DS_Store
+
+# Local Gradle distribution, not source
+tools/
+
+# Never commit vendor material
+SystemUI.apk
+jadx-out/
+apktool-out/

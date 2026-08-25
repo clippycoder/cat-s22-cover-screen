@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark palette: the phone panel is a 480x640 TFT and this app is mostly read at a glance. -->
+    <color name="bg">#FF0E1116</color>
+    <color name="card">#FF171B22</color>
+    <color name="border">#FF262E3A</color>
+    <color name="text_primary">#FFE6EAF0</color>
+    <color name="text_dim">#FF8A94A6</color>
+    <color name="accent">#FF4C8DFF</color>
+    <color name="ok">#FF3DDC84</color>
+    <color name="warn">#FFF5A524</color>
+    <color name="bad">#FFFF5D5D</color>
+    <!-- Switches: the default Material track is dark-on-dark here, so both states are explicit. -->
+    <color name="switch_thumb_off">#FFCED6E0</color>
+    <color name="switch_track_off">#FF5A6472</color>
+</resources>
