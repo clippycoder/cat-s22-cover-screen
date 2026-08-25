@@ -41,6 +41,7 @@ Requires Android 11 on the CAT S22 FLIP. The cover-screen mechanism is specific 
 |---|---|
 | **Start / Stop Service** | Turns the relay on and off without revoking notification access. |
 | **Show message content on the display** | Off shows the sender only — useful if you don't want message text readable on a closed phone. |
+| **Notify for silent messages** | Off by default. A message from a chat or app you have silenced stays off the cover screen, with no icon either. |
 | **Announce messages from** | Which apps to watch. Google Messages and your default texting app are on out of the box. |
 
 Toggling the message-content setting while the cover screen is showing a panel redraws it

@@ -14,8 +14,8 @@ android {
         // Device is Android 11 (API 30). Staying on target 30 keeps us out of the
         // Android 12+ broadcast/PendingIntent tightening described in DESIGN.md §7.
         targetSdk = 30
-        versionCode = 4
-        versionName = "0.4"
+        versionCode = 5
+        versionName = "0.5"
     }
 
     buildTypes {

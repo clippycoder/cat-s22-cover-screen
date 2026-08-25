@@ -1,6 +1,7 @@
 package com.covernotifier.msgs
 
 import android.app.Notification
+import android.app.NotificationManager
 import android.content.Context
 import android.content.SharedPreferences
 import android.os.Handler
@@ -43,6 +44,10 @@ class MessageCollector : NotificationListenerService() {
     /** When false the panel shows the sender only - the preview line is never drawn. */
     private var showText = true
 
+    /** When false a message you have silenced - muted chat, silenced app - is not announced. */
+    private var notifySilent = false
+
+
     /** Current derived state. */
     private var unread = false
     private var newestKey = ""
@@ -59,6 +64,7 @@ class MessageCollector : NotificationListenerService() {
         enabled = prefs.getBoolean(KEY_ENABLED, true)
         watched = prefs.getStringSet(KEY_WATCHED, null) ?: defaultWatched(this)
         showText = prefs.getBoolean(KEY_SHOW_TEXT, true)
+        notifySilent = prefs.getBoolean(KEY_NOTIFY_SILENT, false)
         CoverScreen.ensureChannel(this)
     }
 
@@ -69,7 +75,16 @@ class MessageCollector : NotificationListenerService() {
         // is still on screen while panelUp says false - clear() would skip it. Cancel blind.
         CoverScreen.cancelPanel(this)
         panelUp = false
-        rebuild()
+        // Clear the envelope unconditionally on connect. Normally we never hide an icon this
+        // process did not raise, but a previous process can die holding one lit with nobody left
+        // to clear it - and on this ROM nothing else drives that indicator anyway. The seed below
+        // puts it straight back if messages are actually waiting.
+        CoverScreen.sendNotificationChange(this, RELAY_PKG, false)
+        iconShown = false
+        // Seed, do not announce: the listener reconnects on every process start, and whatever is
+        // waiting at that moment is old news. Re-announcing wakes the cover screen for messages
+        // already read.
+        rebuild(seed = true)
     }
 
     override fun onListenerDisconnected() {
@@ -116,6 +131,8 @@ class MessageCollector : NotificationListenerService() {
                 " category=" + n.category +
                 " template=" + n.extras?.getString(Notification.EXTRA_TEMPLATE) +
                 " flags=0x" + Integer.toHexString(n.flags) +
+                " silenced=" + isSilenced(sbn) +
+                " dnd=" + isDndSuppressed(sbn) +
                 " accepted=" + accept(sbn)
         )
     }
@@ -137,6 +154,12 @@ class MessageCollector : NotificationListenerService() {
         // "announce nothing", not "fall back to the defaults".
         watched = pkgs
         prefs.edit().putStringSet(KEY_WATCHED, watched).apply()
+        rebuild()
+    }
+
+    fun setNotifySilent(v: Boolean) {
+        notifySilent = v
+        prefs.edit().putBoolean(KEY_NOTIFY_SILENT, v).apply()
         rebuild()
     }
 
@@ -176,7 +199,7 @@ class MessageCollector : NotificationListenerService() {
 
     // ------------------------------------------------------------------ pipeline
 
-    private fun rebuild() {
+    private fun rebuild(seed: Boolean = false) {
         val active = try {
             activeNotifications
         } catch (t: Throwable) {
@@ -210,7 +233,7 @@ class MessageCollector : NotificationListenerService() {
                 " sender=" + newestSender)
         when {
             !enabled -> clear()
-            unread && contentChanged -> announce()
+            unread && contentChanged && !seed -> announce()
             unread -> syncIcon(true)
             else -> clear()
         }
@@ -218,6 +241,7 @@ class MessageCollector : NotificationListenerService() {
 
     /** Full announce: icon + wake + our correct-sender panel for ~8s. */
     private fun announce() {
+        Log.i(TAG, "announce: " + newestSender)
         CoverScreen.sendNotificationChange(this, RELAY_PKG, true)
         iconShown = true
         handler.removeCallbacks(showPanel)
@@ -327,10 +351,42 @@ class MessageCollector : NotificationListenerService() {
         if (n.flags and skipFlags != 0) return false
 
         if (!isConversation(n)) return false
+        if (!notifySilent && isSilenced(sbn)) return false
 
         // Even a conversation notification is useless with nothing displayable in it.
         val parsed = parse(sbn)
         return !(TextUtils.isEmpty(parsed.first) && TextUtils.isEmpty(parsed.second))
+    }
+
+    /**
+     * Silenced by you: a muted conversation, or an app whose channel you set below Default.
+     *
+     * Ranking importance folds in per-channel and per-conversation overrides, so this follows what
+     * you already set on the phone. Lighting the cover screen for a chat you deliberately muted
+     * defeats the point of having muted it.
+     *
+     * Deliberately separate from [isDndSuppressed]: this is a standing choice about one chat, that
+     * one is a temporary mode covering everything.
+     */
+    private fun isSilenced(sbn: StatusBarNotification): Boolean {
+        val ranking = rankingOf(sbn) ?: return false
+        return ranking.importance < NotificationManager.IMPORTANCE_DEFAULT
+    }
+
+    /**
+     * Held back by Do Not Disturb right now. Diagnostic only - deliberately NOT a gate: a lit
+     * 128x128 screen makes no sound, so Do Not Disturb has no reason to blank the cover screen.
+     * Kept because it explains, in the log, why a message did or did not alert on the phone itself.
+     */
+    private fun isDndSuppressed(sbn: StatusBarNotification): Boolean {
+        val ranking = rankingOf(sbn) ?: return false
+        return !ranking.matchesInterruptionFilter()
+    }
+
+    private fun rankingOf(sbn: StatusBarNotification): Ranking? {
+        val map = currentRanking ?: return null
+        val ranking = Ranking()
+        return if (map.getRanking(sbn.key, ranking)) ranking else null
     }
 
     /**
@@ -454,6 +510,7 @@ class MessageCollector : NotificationListenerService() {
         const val KEY_WATCHED = "watched"
         const val KEY_SHOW_TEXT = "show_text"
         const val KEY_SEEN = "seen_messaging"
+        const val KEY_NOTIFY_SILENT = "notify_silent"
 
         /** MessagingStyle.Message bundle keys - stable since API 24, not public constants. */
         private const val KEY_TEXT = "text"
@@ -545,8 +602,21 @@ class MessageCollector : NotificationListenerService() {
         /** Two lines of ~11px text on a 128px screen; anything longer is truncated anyway. */
         private const val MAX_PREVIEW = 120
 
-        private const val PANEL_DELAY_MS = 300L
-        private const val PANEL_HOLD_MS = 8000L
+        /**
+         * Zero on purpose. The wake broadcast makes SystemUI paint its own banner, whose sender
+         * comes from the newest row in the telephony database - stale or plain wrong for RCS, which
+         * is the bug this app exists to fix. Any delay here lets that wrong name show before our
+         * panel covers it. Both broadcasts reach the same receiver on SystemUI's main thread in
+         * order, so posting immediately means the banner is overwritten before a frame renders.
+         */
+        private const val PANEL_DELAY_MS = 0L
+        /**
+         * Must OUTLAST SystemUI's own banner timeout. The wake broadcast schedules
+         * refreshViewDelayed(8000), whose handler (PresentationScreen.java:687-689) hides
+         * notifyInfo - the stale-sender banner nested inside normal_info_screen. Cancelling our
+         * panel before that fires would uncover the wrong name for the remainder of the timeout.
+         */
+        private const val PANEL_HOLD_MS = 8300L
 
         @Volatile
         var instance: MessageCollector? = null
@@ -567,6 +637,10 @@ class MessageCollector : NotificationListenerService() {
         fun loadWatched(ctx: Context): Set<String> =
             ctx.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
                 .getStringSet(KEY_WATCHED, null) ?: defaultWatched(ctx)
+
+        fun loadNotifySilent(ctx: Context): Boolean =
+            ctx.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
+                .getBoolean(KEY_NOTIFY_SILENT, false)
 
         /** Packages observed posting a conversation notification, watched or not. */
         fun loadSeenMessaging(ctx: Context): Set<String> =

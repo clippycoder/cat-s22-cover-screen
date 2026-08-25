@@ -145,28 +145,40 @@ class MainActivity : Activity() {
 
     private fun optionsCard(): View {
         val card = card()
+        card.addView(
+            settingRow(
+                "Show message content:",
+                MessageCollector.loadShowText(this)
+            ) { setShowText(it) }
+        )
+        card.addView(
+            settingRow(
+                "Notify for silent messages:",
+                MessageCollector.loadNotifySilent(this)
+            ) { setNotifySilent(it) }
+        )
+        return card
+    }
+
+    private fun settingRow(title: String, checked: Boolean, onChange: (Boolean) -> Unit): View {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(4), 0, dp(4))
         }
-        val labels = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        }
-        labels.addView(TextView(this).apply {
-            text = "Show message content on the display"
+        row.addView(TextView(this).apply {
+            text = title
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(color(R.color.text_primary))
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         })
-        row.addView(labels)
         row.addView(Switch(this).apply {
-            isChecked = MessageCollector.loadShowText(this@MainActivity)
+            isChecked = checked
             tintSwitch(this)
-            setOnCheckedChangeListener { _, on -> setShowText(on) }
+            setOnCheckedChangeListener { _, on -> onChange(on) }
         })
-        card.addView(row)
-        return card
+        return row
     }
 
     private fun appsCard(): View {
@@ -322,6 +334,15 @@ class MainActivity : Activity() {
             listener.setWatched(next)
         } else {
             prefs.edit().putStringSet(MessageCollector.KEY_WATCHED, next).apply()
+        }
+    }
+
+    private fun setNotifySilent(on: Boolean) {
+        val listener = MessageCollector.instance
+        if (listener != null) {
+            listener.setNotifySilent(on)
+        } else {
+            prefs.edit().putBoolean(MessageCollector.KEY_NOTIFY_SILENT, on).apply()
         }
     }
 
