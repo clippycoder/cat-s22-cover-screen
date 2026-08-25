@@ -372,7 +372,7 @@ class MainActivity : Activity() {
         RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), base, null)
 
     /**
-     * Both switch states get explicit colours: the stock Material track is a low-alpha grey that
+     * Both switch states get explicit colors: the stock Material track is a low-alpha gray that
      * disappears against this card, and a single tint makes on and off look identical.
      */
     private fun tintSwitch(sw: Switch) {

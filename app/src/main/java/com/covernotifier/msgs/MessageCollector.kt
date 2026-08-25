@@ -65,7 +65,7 @@ class MessageCollector : NotificationListenerService() {
     override fun onListenerConnected() {
         instance = this
         Log.i(TAG, "listener connected")
-        // PTT content persists until cancelled, so a panel drawn by a previous process instance
+        // PTT content persists until canceled, so a panel drawn by a previous process instance
         // is still on screen while panelUp says false - clear() would skip it. Cancel blind.
         CoverScreen.cancelPanel(this)
         panelUp = false
@@ -326,7 +326,7 @@ class MessageCollector : NotificationListenerService() {
             "com.google.android.apps.messaging"
         )
 
-        /** Two lines of ~11px text on a 128px screen; anything longer is ellipsised anyway. */
+        /** Two lines of ~11px text on a 128px screen; anything longer is truncated anyway. */
         private const val MAX_PREVIEW = 120
 
         private const val PANEL_DELAY_MS = 300L

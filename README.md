@@ -2,18 +2,20 @@
 
 Puts the right sender and message preview on the **CAT S22 Flip**'s external 128×128 cover screen.
 
-The phone already shows an envelope and a banner on the cover screen when a text arrives — but
-SystemUI builds that banner by querying the cellular SMS database for the most recent message. RCS
-and other data messages never land in that database, so the banner shows a stale name, the wrong
-name, or nothing useful at all. You have to open the phone to find out who wrote to you.
+The cover screen only answers to the phone's built-in apps. SystemUI lights its envelope, missed
+call and voicemail indicators for a short, hardcoded list of stock packages — and your actual
+messaging app almost certainly isn't on it. Google Messages, the default SMS app on this phone, has
+no idea the external display exists, and neither does WhatsApp, Signal or anything else you install.
+So a text arrives, the cover screen keeps showing the clock, and you open the phone to find out who
+wrote to you.
 
-Cover Notifier watches the notification itself and draws its own panel on the cover screen with the
-actual sender and, if you want it, the message text. It appears for about eight seconds and then the
-clock comes back.
+Cover Notifier bridges that gap. It watches notifications from the messaging apps you pick and draws
+its own panel on the cover screen with the sender and, if you want it, the message text. It appears
+for about eight seconds and then the clock comes back.
 
 It is a notification listener and nothing else — no foreground service, no alarms, no network
 access, no analytics. It never dismisses, replies to, or alters your notifications; the phone-side
-behaviour of your messaging app is untouched. It costs no measurable battery: it does no polling and
+behavior of your messaging app is untouched. It costs no measurable battery: it does no polling and
 only reacts to notifications the system was already delivering.
 
 Requires Android 11 on the CAT S22 FLIP. The cover-screen mechanism is specific to this device.
@@ -29,9 +31,6 @@ Requires Android 11 on the CAT S22 FLIP. The cover-screen mechanism is specific 
    adb install -r cover-notifier.apk
    ```
 
-   The phone must allow installs from unknown sources. If a work profile or MDM policy sets
-   `no_install_unknown_sources`, the install is refused until that restriction is lifted.
-
 2. Open **Cover Notifier** and grant **notification access** — the setup screen has a button that
    deep-links straight to the right settings page (Settings → Apps → Special app access →
    Notification access). Without it the app can't see messages and does nothing.
@@ -45,7 +44,7 @@ Requires Android 11 on the CAT S22 FLIP. The cover-screen mechanism is specific 
 |---|---|
 | **Start / Stop Service** | Turns the relay on and off without revoking notification access. |
 | **Show message content on the display** | Off shows the sender only — useful if you don't want message text readable on a closed phone. |
-| **Announce messages from** | Which messaging apps to watch. Your default SMS app is enabled out of the box. |
+| **Announce messages from** | Which messaging apps to watch. The list currently covers apps that handle SMS/RCS, and your default one is enabled out of the box. |
 
 Toggling the message-content setting while the cover screen is showing a panel redraws it
 immediately, so you can see the difference straight away.
