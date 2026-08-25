@@ -16,3 +16,8 @@ tools/
 SystemUI.apk
 jadx-out/
 apktool-out/
+
+# Working notes, kept locally but out of the repo
+AUDIT.md
+DESIGN.md
+docs/
